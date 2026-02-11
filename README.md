@@ -133,7 +133,7 @@ cd Yuxi-Know
 docker compose up --build
 ```
 
-等待启动完成后，访问 `http://localhost:5173`
+等待启动完成后，访问 `http://localhost:5123`
 
 ## 示例与演示
 
