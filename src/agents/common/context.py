@@ -12,8 +12,6 @@ from src import config as sys_config
 from src.services.mcp_service import get_mcp_server_names
 from src.utils import logger
 
-from .tools import gen_tool_info, get_buildin_tools
-
 
 @dataclass(kw_only=True)
 class BaseContext:
@@ -65,7 +63,6 @@ class BaseContext:
         default_factory=list,
         metadata={
             "name": "工具",
-            "options": lambda: gen_tool_info(get_buildin_tools()),
             "description": "内置的工具。",
         },
     )
@@ -96,7 +93,8 @@ class BaseContext:
         metadata={
             "name": "Skills",
             "options": [],
-            "description": "可选技能列表（由超级管理员维护）。运行时仅挂载并只读暴露选中的 skills。",
+            "description": "可选技能列表（由超级管理员维护）。运行时仅挂载并只读暴露选中的 "
+            "skills。技能依赖的工具和 MCP 服务器也会被自动挂载。",
             "type": "list",
         },
     )

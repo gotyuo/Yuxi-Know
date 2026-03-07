@@ -551,8 +551,7 @@ async def save_agent_config(
         if "knowledges" in config and config["knowledges"]:
             # 获取用户有权访问的知识库名称
             try:
-                user_info = {"role": current_user.role, "department_id": current_user.department_id}
-                accessible_databases = await knowledge_base.get_databases_by_user(user_info)
+                accessible_databases = await knowledge_base.get_databases_by_user_id(current_user.user_id)
                 accessible_kb_names = {
                     db.get("name") for db in accessible_databases.get("databases", []) if db.get("name")
                 }
@@ -662,6 +661,7 @@ class ThreadResponse(BaseModel):
     user_id: str
     agent_id: str
     title: str | None = None
+    is_pinned: bool = False
     created_at: str
     updated_at: str
 
@@ -707,10 +707,16 @@ async def create_thread(
 
 @chat.get("/threads", response_model=list[ThreadResponse])
 async def list_threads(
-    agent_id: str, db: AsyncSession = Depends(get_db), current_user: User = Depends(get_required_user)
+    agent_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_required_user),
 ):
     """获取用户的所有对话线程 (使用新存储系统)"""
-    return await list_threads_view(agent_id=agent_id, db=db, current_user_id=str(current_user.id))
+    return await list_threads_view(
+        agent_id=agent_id, db=db, current_user_id=str(current_user.id), limit=limit, offset=offset
+    )
 
 
 @chat.delete("/thread/{thread_id}")
@@ -723,6 +729,7 @@ async def delete_thread(
 
 class ThreadUpdate(BaseModel):
     title: str | None = None
+    is_pinned: bool | None = None
 
 
 @chat.put("/thread/{thread_id}", response_model=ThreadResponse)
@@ -736,6 +743,7 @@ async def update_thread(
     return await update_thread_view(
         thread_id=thread_id,
         title=thread_update.title,
+        is_pinned=thread_update.is_pinned,
         db=db,
         current_user_id=str(current_user.id),
     )

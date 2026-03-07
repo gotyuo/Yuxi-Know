@@ -29,57 +29,74 @@
         </button>
       </div>
       <div class="conversation-list">
-        <template v-if="Object.keys(groupedChats).length > 0">
-          <div v-for="(group, groupName) in groupedChats" :key="groupName" class="chat-group">
-            <div class="chat-group-title">{{ groupName }}</div>
-            <div
-              v-for="chat in group"
-              :key="chat.id"
-              class="conversation-item"
-              :class="{ active: currentChatId === chat.id }"
-              @click="selectChat(chat)"
-            >
-              <div class="conversation-title">{{ chat.title || '新的对话' }}</div>
-              <div class="actions-mask"></div>
-              <div class="conversation-actions">
-                <a-dropdown :trigger="['click']" @click.stop>
-                  <template #overlay>
-                    <a-menu>
-                      <a-menu-item
-                        key="rename"
-                        @click.stop="renameChat(chat.id)"
-                        :icon="h(EditOutlined)"
-                      >
-                        重命名
-                      </a-menu-item>
-                      <a-menu-item
-                        key="delete"
-                        @click.stop="deleteChat(chat.id)"
-                        :icon="h(DeleteOutlined)"
-                      >
-                        删除
-                      </a-menu-item>
-                    </a-menu>
-                  </template>
-                  <a-button type="text" class="more-btn" @click.stop>
-                    <MoreOutlined />
-                  </a-button>
-                </a-dropdown>
-              </div>
+        <template v-if="sortedChats.length > 0">
+          <div
+            v-for="chat in sortedChats"
+            :key="chat.id"
+            class="conversation-item"
+            :class="{ active: currentChatId === chat.id }"
+            @click="selectChat(chat)"
+            @click.middle="handleMiddleClickDelete(chat.id)"
+          >
+            <div class="conversation-title">
+              <Pin v-if="chat.is_pinned" :size="14" class="pin-icon" />
+              <span>{{ chat.title || '新的对话' }}</span>
+            </div>
+            <div class="actions-mask"></div>
+            <div class="conversation-actions">
+              <a-dropdown :trigger="['click']" @click.stop>
+                <template #overlay>
+                  <a-menu>
+                    <a-menu-item
+                      key="pin"
+                      @click.stop="togglePin(chat.id)"
+                      :icon="h(chat.is_pinned ? PinOff : Pin, { size: 14 })"
+                    >
+                      {{ chat.is_pinned ? '取消置顶' : '置顶' }}
+                    </a-menu-item>
+                    <a-menu-item
+                      key="rename"
+                      @click.stop="renameChat(chat.id)"
+                      :icon="h(Pencil, { size: 14 })"
+                    >
+                      重命名
+                    </a-menu-item>
+                    <a-menu-item
+                      key="delete"
+                      @click.stop="deleteChat(chat.id)"
+                      :icon="h(Trash2, { size: 14 })"
+                    >
+                      删除
+                    </a-menu-item>
+                  </a-menu>
+                </template>
+                <a-button type="text" class="more-btn" @click.stop>
+                  <MoreVertical :size="16" />
+                </a-button>
+              </a-dropdown>
             </div>
           </div>
         </template>
         <div v-else class="empty-list">暂无对话历史</div>
+        <div v-if="hasMoreChats" class="load-more-wrapper">
+          <a-button
+            type="text"
+            class="load-more-btn"
+            :loading="isLoadingMore"
+            @click="handleLoadMore"
+          >
+            {{ isLoadingMore ? '加载中...' : '加载更多' }}
+          </a-button>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, h } from 'vue'
-import { DeleteOutlined, EditOutlined, MoreOutlined } from '@ant-design/icons-vue'
+import { computed, h, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { PanelLeftClose, MessageSquarePlus, LoaderCircle } from 'lucide-vue-next'
+import { PanelLeftClose, MessageSquarePlus, LoaderCircle, Pin, PinOff, Pencil, Trash2, MoreVertical } from 'lucide-vue-next'
 import dayjs, { parseToShanghai } from '@/utils/time'
 import { useChatUIStore } from '@/stores/chatUI'
 import { useInfoStore } from '@/stores/info'
@@ -119,6 +136,14 @@ const props = defineProps({
   selectedAgentId: {
     type: String,
     default: null
+  },
+  hasMoreChats: {
+    type: Boolean,
+    default: false
+  },
+  isLoadingMore: {
+    type: Boolean,
+    default: false
   }
 })
 
@@ -127,60 +152,24 @@ const emit = defineEmits([
   'select-chat',
   'delete-chat',
   'rename-chat',
+  'toggle-pin',
   'toggle-sidebar',
-  'open-agent-modal'
+  'open-agent-modal',
+  'load-more-chats'
 ])
 
-const groupedChats = computed(() => {
-  const groups = {
-    今天: [],
-    七天内: [],
-    三十天内: []
-  }
-
-  // 确保使用北京时间进行比较
-  const now = dayjs().tz('Asia/Shanghai')
-  const today = now.startOf('day')
-  const sevenDaysAgo = now.subtract(7, 'day').startOf('day')
-  const thirtyDaysAgo = now.subtract(30, 'day').startOf('day')
-
-  // Sort chats by creation date, newest first
-  const sortedChats = [...props.chatsList].sort((a, b) => {
+// 按置顶和时间倒序排列的对话列表
+const sortedChats = computed(() => {
+  return [...props.chatsList].sort((a, b) => {
+    // 置顶的排在前面
+    if (a.is_pinned !== b.is_pinned) {
+      return a.is_pinned ? -1 : 1
+    }
     const dateA = parseToShanghai(b.created_at)
     const dateB = parseToShanghai(a.created_at)
     if (!dateA || !dateB) return 0
     return dateA.diff(dateB)
   })
-
-  sortedChats.forEach((chat) => {
-    // 将后端时间当作UTC时间处理，然后转换为北京时间
-    const chatDate = parseToShanghai(chat.created_at)
-    if (!chatDate) {
-      return
-    }
-    if (chatDate.isAfter(today)) {
-      groups['今天'].push(chat)
-    } else if (chatDate.isAfter(sevenDaysAgo)) {
-      groups['七天内'].push(chat)
-    } else if (chatDate.isAfter(thirtyDaysAgo)) {
-      groups['三十天内'].push(chat)
-    } else {
-      const monthKey = chatDate.format('YYYY-MM')
-      if (!groups[monthKey]) {
-        groups[monthKey] = []
-      }
-      groups[monthKey].push(chat)
-    }
-  })
-
-  // Remove empty groups
-  for (const key in groups) {
-    if (groups[key].length === 0) {
-      delete groups[key]
-    }
-  }
-
-  return groups
 })
 
 const createNewChat = () => {
@@ -192,6 +181,10 @@ const selectChat = (chat) => {
 }
 
 const deleteChat = (chatId) => {
+  emit('delete-chat', chatId)
+}
+
+const handleMiddleClickDelete = (chatId) => {
   emit('delete-chat', chatId)
 }
 
@@ -236,6 +229,14 @@ const renameChat = async (chatId) => {
 
 const toggleCollapse = () => {
   emit('toggle-sidebar')
+}
+
+const handleLoadMore = () => {
+  emit('load-more-chats')
+}
+
+const togglePin = (chatId) => {
+  emit('toggle-pin', chatId)
 }
 </script>
 
@@ -386,6 +387,14 @@ const toggleCollapse = () => {
         overflow: hidden;
         text-overflow: ellipsis;
         transition: color 0.2s ease;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+
+        .pin-icon {
+          flex-shrink: 0;
+          color: var(--main-color);
+        }
       }
 
       .actions-mask {
@@ -413,6 +422,9 @@ const toggleCollapse = () => {
         .more-btn {
           color: var(--gray-600);
           background-color: transparent !important;
+          display: flex;
+          justify-content: center;
+          align-items: center;
           padding: 0;
           &:hover {
             color: var(--main-500);
@@ -452,6 +464,19 @@ const toggleCollapse = () => {
       margin-top: 20px;
       color: var(--gray-500);
       font-size: 14px;
+    }
+
+    .load-more-wrapper {
+      text-align: center;
+      padding: 12px 8px;
+
+      .load-more-btn {
+        color: var(--main-color);
+        font-size: 13px;
+        &:hover {
+          color: var(--main-600);
+        }
+      }
     }
   }
 }

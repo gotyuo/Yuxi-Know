@@ -2,7 +2,6 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, UploadFile
-from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents import agent_manager
@@ -90,9 +89,7 @@ async def _sync_thread_attachment_state(
         # 仅对 /attachments 命名空间做增量更新，避免覆盖 agent 运行期生成的其它文件。
         next_attachment_files = _build_state_files(attachments)
         prev_attachment_paths = {
-            path
-            for path in existing_files.keys()
-            if isinstance(path, str) and path.startswith("/attachments/")
+            path for path in existing_files.keys() if isinstance(path, str) and path.startswith("/attachments/")
         }
         next_attachment_paths = set(next_attachment_files.keys())
 
@@ -159,6 +156,8 @@ async def list_threads_view(
     agent_id: str,
     db: AsyncSession,
     current_user_id: str,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict]:
     if not agent_id:
         raise HTTPException(status_code=422, detail="agent_id 不能为空")
@@ -168,6 +167,8 @@ async def list_threads_view(
         user_id=str(current_user_id),
         agent_id=agent_id,
         status="active",
+        limit=limit,
+        offset=offset,
     )
 
     return [
@@ -176,6 +177,7 @@ async def list_threads_view(
             "user_id": conv.user_id,
             "agent_id": conv.agent_id,
             "title": conv.title,
+            "is_pinned": bool(conv.is_pinned),
             "created_at": conv.created_at.isoformat(),
             "updated_at": conv.updated_at.isoformat(),
         }
@@ -200,13 +202,14 @@ async def delete_thread_view(
 async def update_thread_view(
     *,
     thread_id: str,
-    title: str | None,
+    title: str | None = None,
+    is_pinned: bool | None = None,
     db: AsyncSession,
     current_user_id: str,
 ) -> dict:
     conv_repo = ConversationRepository(db)
     await require_user_conversation(conv_repo, thread_id, str(current_user_id))
-    updated_conv = await conv_repo.update_conversation(thread_id, title=title)
+    updated_conv = await conv_repo.update_conversation(thread_id, title=title, is_pinned=is_pinned)
     if not updated_conv:
         raise HTTPException(status_code=500, detail="更新失败")
     return {
@@ -214,6 +217,7 @@ async def update_thread_view(
         "user_id": updated_conv.user_id,
         "agent_id": updated_conv.agent_id,
         "title": updated_conv.title,
+        "is_pinned": bool(updated_conv.is_pinned),
         "created_at": updated_conv.created_at.isoformat(),
         "updated_at": updated_conv.updated_at.isoformat(),
     }

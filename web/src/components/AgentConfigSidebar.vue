@@ -148,16 +148,40 @@
                   <div v-if="getConfigOptions(value).length <= 5" class="multi-select-cards">
                     <div class="multi-select-label">
                       <span>已选择 {{ getSelectedCount(key) }} 项</span>
-                      <a-button
-                        type="link"
-                        size="small"
-                        class="clear-btn"
-                        @click="clearSelection(key)"
-                        v-if="getSelectedCount(key) > 0"
-                      >
-                        清空
-                      </a-button>
+                      <div class="label-actions">
+                        <a-button
+                          type="link"
+                          size="small"
+                          class="clear-btn"
+                          @click="clearSelection(key)"
+                          v-if="getSelectedCount(key) > 0"
+                        >
+                          清空
+                        </a-button>
+                        <template v-if="isToolsKind(value.template_metadata?.kind)">
+                          <a-divider type="vertical" />
+                          <a-button
+                            type="link"
+                            size="small"
+                            @click="refreshConfigOptions(key, value.template_metadata.kind)"
+                            class="action-btn"
+                          >
+                            <RotateCw :size="12" />
+                            刷新
+                          </a-button>
+                          <a-button
+                            type="link"
+                            size="small"
+                            @click="navigateToConfigPage(value.template_metadata.kind)"
+                            class="action-btn"
+                          >
+                            <Settings :size="12" />
+                            配置
+                          </a-button>
+                        </template>
+                      </div>
                     </div>
+
                     <div class="options-grid">
                       <div
                         v-for="option in getConfigOptions(value)"
@@ -322,6 +346,28 @@
               <Search :size="16" class="search-icon" />
             </template>
           </a-input>
+          <template v-if="isToolsKind(currentConfigKind)">
+            <a-button
+              type="text"
+              size="small"
+              @click="refreshConfigOptions(currentConfigKey, currentConfigKind)"
+              class="modal-action-btn"
+              title="刷新列表"
+            >
+              <RotateCw :size="14" />
+              刷新
+            </a-button>
+            <a-button
+              type="text"
+              size="small"
+              @click="navigateToConfigPage(currentConfigKind)"
+              class="modal-action-btn"
+              title="跳转配置"
+            >
+              <Settings :size="14" />
+              配置
+            </a-button>
+          </template>
         </div>
 
         <div class="selection-list">
@@ -367,12 +413,14 @@
 <script setup>
 import { ref, computed, nextTick, watch } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { X, Trash2, Check, Plus, Search, Star } from 'lucide-vue-next'
+import { useRouter } from 'vue-router'
+import { X, Trash2, Check, Plus, Search, Star, RotateCw, Settings } from 'lucide-vue-next'
 import ModelSelectorComponent from '@/components/ModelSelectorComponent.vue'
 import { useAgentStore } from '@/stores/agent'
 import { useUserStore } from '@/stores/user'
 import { useDatabaseStore } from '@/stores/database'
 import { skillApi } from '@/apis/skill_api'
+import { toolApi } from '@/apis/tool_api'
 import { storeToRefs } from 'pinia'
 
 // Props
@@ -394,6 +442,7 @@ const emit = defineEmits(['close'])
 const agentStore = useAgentStore()
 const userStore = useUserStore()
 const databaseStore = useDatabaseStore()
+const router = useRouter()
 
 watch(
   () => props.isOpen,
@@ -401,6 +450,7 @@ watch(
     if (val) {
       databaseStore.loadDatabases().catch(() => {})
       loadLiveSkillOptions().catch(() => {})
+      loadToolOptions().catch(() => {})
       if (selectedAgentId.value) {
         try {
           await agentStore.fetchAgentDetail(selectedAgentId.value, true)
@@ -433,6 +483,7 @@ const selectionSearchText = ref('')
 const systemPromptEditMode = ref(false)
 const activeTab = ref('basic')
 const liveSkillOptions = ref([])
+const toolOptionsFromApi = ref([])
 
 const isEmptyConfig = computed(() => {
   return !selectedAgentId.value || Object.keys(configurableItems.value).length === 0
@@ -473,9 +524,13 @@ const segmentedOptions = computed(() => {
   return options
 })
 
-const loadLiveSkillOptions = async () => {
+const loadLiveSkillOptions = async (force = false) => {
   if (!userStore.isAdmin) {
     liveSkillOptions.value = []
+    return
+  }
+  // 如果不是强制刷新且已有数据，则跳过
+  if (!force && liveSkillOptions.value.length > 0) {
     return
   }
   try {
@@ -491,10 +546,91 @@ const loadLiveSkillOptions = async () => {
   }
 }
 
+const loadToolOptions = async (force = false) => {
+  if (!userStore.isAdmin) {
+    toolOptionsFromApi.value = []
+    return
+  }
+  // 如果不是强制刷新且已有数据，则跳过
+  if (!force && toolOptionsFromApi.value.length > 0) {
+    return
+  }
+  try {
+    const result = await toolApi.getTools()
+    toolOptionsFromApi.value = (result?.data || []).map((item) => ({
+      id: item.id,
+      name: item.name || item.id,
+      description: item.description || ''
+    }))
+  } catch (error) {
+    console.warn('加载工具列表失败:', error)
+  }
+}
+
+// 判断是否为需要跳转的配置类型
+const isToolsKind = (kind) => {
+  return ['knowledges', 'tools', 'mcps', 'skills'].includes(kind)
+}
+
+// 强制刷新对应配置项的选项列表
+const refreshConfigOptions = async (key, kind) => {
+  try {
+    switch (kind) {
+      case 'knowledges':
+        await databaseStore.loadDatabases(true)
+        message.success('知识库列表已刷新')
+        break
+      case 'tools':
+        await loadToolOptions(true)
+        message.success('工具列表已刷新')
+        break
+      case 'skills':
+        await loadLiveSkillOptions(true)
+        message.success('Skills 列表已刷新')
+        break
+      case 'mcps':
+        // MCP 没有前端 store，提示用户刷新页面
+        message.info('请在 MCP 管理页面刷新')
+        break
+    }
+  } catch (error) {
+    console.error('刷新配置选项失败:', error)
+    message.error('刷新失败')
+  }
+}
+
+// 跳转到对应管理页面
+const navigateToConfigPage = (kind) => {
+  // 先关闭选择弹窗
+  closeSelectionModal()
+  // 延迟跳转，确保弹窗先关闭
+  setTimeout(() => {
+    switch (kind) {
+      case 'knowledges':
+        router.push('/database')
+        break
+      case 'tools':
+        router.push({ path: '/extensions', query: { tab: 'tools' } })
+        break
+      case 'mcps':
+        router.push({ path: '/extensions', query: { tab: 'mcp' } })
+        break
+      case 'skills':
+        router.push({ path: '/extensions', query: { tab: 'skills' } })
+        break
+    }
+  }, 100)
+}
+
 // 通用选项获取与处理
 const getConfigOptions = (value) => {
   if (value?.template_metadata?.kind === 'tools') {
-    return availableTools.value ? Object.values(availableTools.value) : []
+    // 优先使用从 API 获取的工具列表，否则回退到 configurableItems 中的选项
+    return toolOptionsFromApi.value.length > 0
+      ? toolOptionsFromApi.value
+      : availableTools.value
+        ? Object.values(availableTools.value)
+        : []
   }
   if (value?.template_metadata?.kind === 'knowledges') {
     return databaseStore.databases || []
@@ -531,6 +667,11 @@ const getOptionDescription = (option) => {
   }
   return null
 }
+
+const currentConfigKind = computed(() => {
+  if (!currentConfigKey.value) return null
+  return configurableItems.value[currentConfigKey.value]?.template_metadata?.kind
+})
 
 const filteredOptions = computed(() => {
   if (!currentConfigKey.value) return []
@@ -644,13 +785,9 @@ const getOptionLabelFromValue = (key, val) => {
 
 const openSelectionModal = async (key) => {
   currentConfigKey.value = key
-  // 如果是工具，可能需要刷新
-  if (configurableItems.value[key]?.template_metadata?.kind === 'tools' && selectedAgentId.value) {
-    try {
-      await agentStore.fetchAgentDetail(selectedAgentId.value, true)
-    } catch (error) {
-      console.error('刷新工具列表失败:', error)
-    }
+  // 如果是工具，从 API 刷新工具列表
+  if (configurableItems.value[key]?.template_metadata?.kind === 'tools') {
+    await loadToolOptions()
   }
   // 如果是知识库，需要获取知识库列表
   if (configurableItems.value[key]?.template_metadata?.kind === 'knowledges') {
@@ -715,7 +852,10 @@ const validateAndFilterConfig = () => {
     const configItem = configItems[key]
     const currentValue = validatedConfig[key]
 
-    if (Array.isArray(currentValue) && (configItem.template_metadata?.kind === 'tools' || configItem.type === 'list')) {
+    if (
+      Array.isArray(currentValue) &&
+      (configItem.template_metadata?.kind === 'tools' || configItem.type === 'list')
+    ) {
       const options = getConfigOptions(configItem)
       const validValues = new Set(options.map((opt) => String(getOptionValue(opt))))
       if (validValues.size === 0) return
@@ -1143,6 +1283,27 @@ const confirmDeleteConfig = async () => {
     margin-bottom: 12px;
     font-size: 12px;
     color: var(--gray-600);
+
+    .label-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+
+      .action-btn {
+        font-size: 12px;
+        color: var(--gray-600);
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding: 2px 6px;
+        height: auto;
+        line-height: 1;
+
+        &:hover {
+          color: var(--main-color);
+        }
+      }
+    }
   }
 
   .options-grid {
@@ -1214,8 +1375,12 @@ const confirmDeleteConfig = async () => {
   .selection-modal-content {
     .selection-search {
       margin-bottom: 16px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
 
       .search-input {
+        flex: 1;
         border-radius: 8px;
         border: 1px solid var(--gray-300);
         height: 36px;
@@ -1239,6 +1404,19 @@ const confirmDeleteConfig = async () => {
 
         &:hover {
           border-color: var(--gray-400);
+        }
+      }
+
+      .modal-action-btn {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 13px;
+        color: var(--gray-600);
+        white-space: nowrap;
+
+        &:hover {
+          color: var(--main-color);
         }
       }
     }

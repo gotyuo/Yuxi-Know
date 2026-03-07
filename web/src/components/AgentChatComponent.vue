@@ -9,12 +9,16 @@
       :agents="agents"
       :selected-agent-id="currentAgentId"
       :is-creating-new-chat="chatUIStore.creatingNewChat"
+      :has-more-chats="hasMoreChats"
+      :is-loading-more="isLoadingMoreChats"
       @create-chat="createNewChat"
       @select-chat="selectChat"
       @delete-chat="deleteChat"
       @rename-chat="renameChat"
+      @toggle-pin="togglePinChat"
       @toggle-sidebar="toggleSidebar"
       @open-agent-modal="openAgentModal"
+      @load-more-chats="loadMoreChats"
       :class="{
         'sidebar-open': chatUIStore.isSidebarOpen,
         'no-transition': localUIState.isInitialRender
@@ -286,6 +290,8 @@ const chatState = reactive({
 // 组件级别的线程和消息状态
 const threads = ref([])
 const threadMessages = ref({})
+const hasMoreChats = ref(true) // 是否还有更多对话可加载
+const isLoadingMoreChats = ref(false) // 加载更多对话中
 
 // 本地 UI 状态（仅在本组件使用）
 const localUIState = reactive({
@@ -356,7 +362,10 @@ const currentAgentState = computed(() => {
 const countFiles = (files) => {
   if (!files) return 0
   if (Array.isArray(files)) {
-    return files.reduce((c, item) => c + (item && typeof item === 'object' ? Object.keys(item).length : 0), 0)
+    return files.reduce(
+      (c, item) => c + (item && typeof item === 'object' ? Object.keys(item).length : 0),
+      0
+    )
   }
   return typeof files === 'object' ? Object.keys(files).length : 0
 }
@@ -585,14 +594,45 @@ const fetchThreads = async (agentId = null) => {
 
   chatUIStore.isLoadingThreads = true
   try {
-    const fetchedThreads = await threadApi.getThreads(targetAgentId)
+    const fetchedThreads = await threadApi.getThreads(targetAgentId, 100, 0)
     threads.value = fetchedThreads || []
+    // 如果返回的数量小于limit，说明没有更多了
+    hasMoreChats.value = fetchedThreads && fetchedThreads.length >= 100
   } catch (error) {
     console.error('Failed to fetch threads:', error)
     handleChatError(error, 'fetch')
     throw error
   } finally {
     chatUIStore.isLoadingThreads = false
+  }
+}
+
+// 加载更多对话
+const loadMoreChats = async () => {
+  if (isLoadingMoreChats.value || !hasMoreChats.value) return
+
+  const targetAgentId = currentAgentId.value
+  if (!targetAgentId) return
+
+  isLoadingMoreChats.value = true
+  try {
+    const offset = threads.value.length
+    const fetchedThreads = await threadApi.getThreads(targetAgentId, 100, offset)
+    if (fetchedThreads && fetchedThreads.length > 0) {
+      // 去除重复的置顶对话（后端每次都返回所有置顶对话）
+      const existingIds = new Set(threads.value.map((t) => t.id))
+      const newThreads = fetchedThreads.filter((t) => !existingIds.has(t.id))
+
+      threads.value = [...threads.value, ...newThreads]
+      hasMoreChats.value = newThreads.length >= 100
+    } else {
+      hasMoreChats.value = false
+    }
+  } catch (error) {
+    console.error('Failed to load more chats:', error)
+    handleChatError(error, 'fetch')
+  } finally {
+    isLoadingMoreChats.value = false
   }
 }
 
@@ -640,25 +680,43 @@ const deleteThread = async (threadId) => {
 }
 
 // 更新线程标题
-const updateThread = async (threadId, title) => {
-  if (!threadId || !title) return
+const updateThread = async (threadId, title, is_pinned) => {
+  if (!threadId) return
 
-  const normalizedTitle = String(title).replace(/\s+/g, ' ').trim().slice(0, 255)
-  if (!normalizedTitle) return
+  if (title) {
+    const normalizedTitle = String(title).replace(/\s+/g, ' ').trim().slice(0, 255)
+    if (!normalizedTitle) return
 
-  chatState.isRenamingThread = true
-  try {
-    await threadApi.updateThread(threadId, normalizedTitle)
-    const thread = threads.value.find((t) => t.id === threadId)
-    if (thread) {
-      thread.title = normalizedTitle
+    chatState.isRenamingThread = true
+    try {
+      await threadApi.updateThread(threadId, normalizedTitle, is_pinned)
+      const thread = threads.value.find((t) => t.id === threadId)
+      if (thread) {
+        thread.title = normalizedTitle
+        if (is_pinned !== undefined) {
+          thread.is_pinned = is_pinned
+        }
+      }
+    } catch (error) {
+      console.error('Failed to update thread:', error)
+      handleChatError(error, 'update')
+      throw error
+    } finally {
+      chatState.isRenamingThread = false
     }
-  } catch (error) {
-    console.error('Failed to update thread:', error)
-    handleChatError(error, 'update')
-    throw error
-  } finally {
-    chatState.isRenamingThread = false
+  } else if (is_pinned !== undefined) {
+    // 只更新置顶状态
+    try {
+      await threadApi.updateThread(threadId, null, is_pinned)
+      const thread = threads.value.find((t) => t.id === threadId)
+      if (thread) {
+        thread.is_pinned = is_pinned
+      }
+    } catch (error) {
+      console.error('Failed to update thread pin status:', error)
+      handleChatError(error, 'update')
+      throw error
+    }
   }
 }
 
@@ -1041,9 +1099,11 @@ const startRunStream = async (threadId, runId, afterSeq = '0') => {
           ts.activeRunId = null
           ts.lastRetryableJobTry = null
           clearActiveRunSnapshot(threadId)
-          fetchThreadMessages({ agentId: currentAgentId.value, threadId, delay: 200 }).finally(() => {
-            fetchAgentState(currentAgentId.value, threadId)
-          })
+          fetchThreadMessages({ agentId: currentAgentId.value, threadId, delay: 200 }).finally(
+            () => {
+              fetchAgentState(currentAgentId.value, threadId)
+            }
+          )
         } else if (ts.activeRunId === runId) {
           window.setTimeout(() => {
             if (ts.activeRunId === runId && !ts.runStreamAbortController) {
@@ -1229,10 +1289,6 @@ const createNewChat = async () => {
   // 如果第一个对话为空，直接切换到第一个对话而不是创建新对话
   if (await switchToFirstChatIfEmpty()) return
 
-  // 只有当当前对话是第一个对话且为空时，才阻止创建新对话
-  const currentThreadIndex = threads.value.findIndex((thread) => thread.id === currentChatId.value)
-  if (currentChatId.value && conversations.value.length === 0 && currentThreadIndex === 0) return
-
   chatUIStore.creatingNewChat = true
   try {
     const newThread = await createThread(currentAgentId.value, '新的对话')
@@ -1339,6 +1395,27 @@ const renameChat = async (data) => {
   }
 }
 
+const togglePinChat = async (chatId) => {
+  const chat = chatsList.value.find((c) => c.id === chatId)
+  if (!chat) return
+  try {
+    // 保存当前选中的对话ID
+    const prevChatId = currentChatId.value
+
+    await updateThread(chatId, null, !chat.is_pinned)
+
+    // 刷新对话列表
+    await loadChatsList()
+
+    // 恢复当前选中的对话
+    if (prevChatId) {
+      chatState.currentThreadId = prevChatId
+    }
+  } catch (error) {
+    handleChatError(error, 'pin')
+  }
+}
+
 const handleSendMessage = async ({ image } = {}) => {
   const text = userInput.value.trim()
   if ((!text && !image) || !currentAgent.value || isProcessing.value) return
@@ -1416,14 +1493,12 @@ const handleSendMessage = async ({ image } = {}) => {
   } finally {
     threadState.streamAbortController = null
     // 异步加载历史记录，保持当前消息显示直到历史记录加载完成
-    fetchThreadMessages({ agentId: currentAgentId.value, threadId: threadId }).finally(
-      () => {
-        // 历史记录加载完成后，安全地清空当前进行中的对话
-        resetOnGoingConv(threadId)
-        fetchAgentState(currentAgentId.value, threadId)
-        scrollController.scrollToBottom()
-      }
-    )
+    fetchThreadMessages({ agentId: currentAgentId.value, threadId: threadId }).finally(() => {
+      // 历史记录加载完成后，安全地清空当前进行中的对话
+      resetOnGoingConv(threadId)
+      fetchAgentState(currentAgentId.value, threadId)
+      scrollController.scrollToBottom()
+    })
   }
 }
 
@@ -1462,7 +1537,6 @@ const handleSendOrStop = async (payload) => {
 
 // ==================== 人工审批处理 ====================
 const handleApprovalWithStream = async (approved) => {
-
   const threadId = approvalState.threadId
   if (!threadId) {
     message.error('无效的审批请求')
@@ -1500,12 +1574,10 @@ const handleApprovalWithStream = async (approved) => {
     }
 
     // 异步加载历史记录，保持当前消息显示直到历史记录加载完成
-    fetchThreadMessages({ agentId: currentAgentId.value, threadId: threadId }).finally(
-      () => {
-        resetOnGoingConv(threadId)
-        scrollController.scrollToBottom()
-      }
-    )
+    fetchThreadMessages({ agentId: currentAgentId.value, threadId: threadId }).finally(() => {
+      resetOnGoingConv(threadId)
+      scrollController.scrollToBottom()
+    })
   }
 }
 
